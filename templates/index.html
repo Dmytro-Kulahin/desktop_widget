@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Portfolio Dashboard</title>
+    <link rel="stylesheet" type="text/css" href="/static/css/style.css">
+    <style>
+        body {
+            background-color: {{ BACKGROUND_COLOR }};
+        }
+        
+
+        #widget-clock-container {
+            margin-top: {{ CLOCK_WIDGET_MARGIN_TOP }};
+        }
+        
+        #widget-clock-container img {
+            width: {{ CLOCK_DIGIT_WIDTH }};
+            height: {{ CLOCK_DIGIT_HEIGHT }};
+        }
+
+
+        #widget-portfolio-container {
+            width: {{ TABLE_WIDGET_WIDTH }};
+            background-color: {{ TABLE_BACKGROUND_COLOR }};
+            font-size: {{ TABLE_FONT_SIZE }};
+            color: {{ TABLE_TEXT_DEFAULT_COLOR }};
+        }
+        
+        #widget-portfolio-table th {
+            color: {{ TABLE_HEADER_TEXT_COLOR }};
+        }
+        
+        #widget-portfolio-table,
+        #widget-portfolio-table td,
+        #widget-portfolio-table th {
+            border: 1px solid {{ TABLE_BORDER_COLOR }};
+        }
+        
+
+
+    </style>
+</head>
+<body>
+
+    {% if BACKGROUND_TYPE == "image" %}
+    <img src="/static/bg/{{ BACKGROUND_IMAGE_FILE }}" id="layout-backdrop" />
+    {% elif BACKGROUND_TYPE == "video" %}
+    <video autoplay loop muted playsinline id="layout-backdrop">
+        <source src="/static/bg/{{ BACKGROUND_VIDEO_FILE }}" type="video/mp4">
+    </video>
+    {% endif %}
+
+    <div id="network-status-indicator" style="display: none;">No Connection</div>
+
+    <div id="dashboard-center-alignment-zone">
+
+
+        <div id="widget-clock-container">
+            {% if clock_error %}
+            <div class="widget-error-fallback">[Widget Error: {{ clock_error }}]</div>
+            {% else %}
+            <img id="clk-h1" src="/static/digits/0.png" />
+            <img id="clk-h2" src="/static/digits/0.png" />
+            <img id="clk-colon" />
+            <img id="clk-m1" src="/static/digits/0.png" />
+            <img id="clk-m2" src="/static/digits/0.png" />
+            {% endif %}
+        </div>
+
+        <div empty space between widgets> <br><br><br><br> </div>
+
+
+
+        <div id="widget-portfolio-container">
+            {% if portfolio_error %}
+            <div class="widget-error-fallback">[Widget Error: {{ portfolio_error }}]</div>
+            {% else %}
+            <div id="portfolio-data-mount">
+                <table id="widget-portfolio-table" cellpadding="6" cellspacing="0">
+                    <tr>
+                </table>
+                <div id="portfolio-summary-row"></div>
+            </div>
+            {% endif %}
+        </div>
+
+
+
+    </div>
+
+    <script type="text/javascript">
+        var POLLING_INTERVAL_MS = {{ DATA_REFRESH_INTERVAL_MS }};
+    </script>
+    <script type="text/javascript" src="/static/js/dashboard.js"></script>
+</body>
+</html>
