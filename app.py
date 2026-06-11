@@ -531,7 +531,7 @@ if __name__ == '__main__':
         _api_smoke_test()
         _print_banner(_portfolio_ready, _portfolio_error)
 
-        app.run(host='0.0.0.0', port=5000, threaded=False, debug=False)
+        app.run(host='0.0.0.0', port=5000, threaded=True, debug=False)
 
     except Exception as e:
         print(f"\n{'=' * 50}\nFATAL ERROR:\n{'=' * 50}\n{e}\n{'=' * 50}")

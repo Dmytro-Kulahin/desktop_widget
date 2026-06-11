@@ -151,16 +151,16 @@ var serverDown = false;
 function showServerDownOverlay() {
     if (!serverDown) {
         serverDown = true;
-        var overlay = document.getElementById("server-down-overlay");
-        if (overlay) overlay.style.display = "flex";
+        var banner = document.getElementById("server-down-banner");
+        if (banner) banner.style.display = "block";
     }
 }
 
 function hideServerDownOverlay() {
     if (serverDown) {
         serverDown = false;
-        var overlay = document.getElementById("server-down-overlay");
-        if (overlay) overlay.style.display = "none";
+        var banner = document.getElementById("server-down-banner");
+        if (banner) banner.style.display = "none";
         requestPortfolioDataUpdate();
         fetchServerTime();
     }
