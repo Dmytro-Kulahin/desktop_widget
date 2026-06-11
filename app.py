@@ -2,175 +2,163 @@ import os
 import sys
 import subprocess
 
-# ==============================================================================
-# LIBRARY DEPENDENCY CHECKER & AUTO-INSTALLER
-# ==============================================================================
+# Auto-install missing dependencies
 required_libraries = {
     'flask': 'Flask',
     'requests': 'requests'
 }
 
 missing_libraries = []
-
 for import_name, pip_name in required_libraries.items():
     try:
         __import__(import_name)
-        print("[OK] Library '" + import_name + "' is installed.")
+        print(f"[OK] Library '{import_name}' is installed.")
     except ImportError:
         missing_libraries.append(pip_name)
-        print("[MISSING] Library '" + import_name + "' is NOT installed.")
+        print(f"[MISSING] Library '{import_name}' is NOT installed.")
 
 if missing_libraries:
-    print("\n" + "=" * 50)
-    print("INSTALLING MISSING LIBRARIES...")
-    print("=" * 50)
+    print(f"\n{'=' * 50}\nINSTALLING MISSING LIBRARIES...\n{'=' * 50}")
     for lib in missing_libraries:
-        print("Installing: " + lib)
+        print(f"Installing: {lib}")
         subprocess.check_call([sys.executable, "-m", "pip", "install", lib])
-    print("=" * 50)
-    print("ALL LIBRARIES INSTALLED. CONTINUING...")
-    print("=" * 50 + "\n")
+    print(f"{'=' * 50}\nALL LIBRARIES INSTALLED. CONTINUING...\n{'=' * 50}\n")
 
-# Now import all required modules
 import csv
 import json
+import sqlite3
 import requests
+from contextlib import contextmanager
 from datetime import datetime
 from flask import Flask, render_template, jsonify
 
 import config
-import sqlite3
 
-# ==============================================================================
-# FLASK APPLICATION INSTANCE (SINGLE-THREADED)
-# ==============================================================================
+# Flask app instance
 app = Flask(__name__)
 
-# ==============================================================================
-# GLOBAL WIDGET STATE FLAGS (SET DURING STARTUP)
-# ==============================================================================
-portfolio_widget_ready = True
-clock_widget_ready = True
-portfolio_error_msg = ""
-clock_error_msg = ""
+# Widget state — set once at startup, read-only thereafter
+_portfolio_ready = True
+_portfolio_error = ""
+_clock_ready = True
+_clock_error = ""
 
-# ==============================================================================
-# HELPER PURE FUNCTION: CLEAN NUMERIC VALUES
-# ==============================================================================
+# Yahoo Finance API constants
+YAHOO_CHART_URL = "https://query1.finance.yahoo.com/v8/finance/chart/"
+YAHOO_HEADERS = {
+    'User-Agent': ('Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 '
+                   '(KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36')
+}
+YAHOO_PARAMS = {'range': '2d', 'interval': '1d'}
+
+# CSV column indices
+COL_TICKER, COL_PRICE, COL_AVG, COL_QTY, COL_START_BALL = 0, 1, 2, 3, 5
+
+
+@contextmanager
+def get_db():
+    """Context manager for SQLite connections — guarantees close."""
+    conn = sqlite3.connect(config.DB_PATH)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 def clean_numeric_value(val):
-    """Remove commas, spaces, currency symbols, return float or 0.0"""
+    """Strip currency symbols, commas, spaces; return float or 0.0."""
     if val is None or str(val).strip() == "":
         return 0.0
-    cleaned = str(val).strip()
-    cleaned = cleaned.replace("$", "").replace(",", "").replace(" ", "")
+    cleaned = str(val).strip().replace("$", "").replace(",", "").replace(" ", "")
     try:
         return float(cleaned)
     except ValueError:
         return 0.0
 
-# ==============================================================================
-# DECENTRALIZED STARTUP SELF-TESTS
-# ==============================================================================
-def run_startup_self_tests():
-    global portfolio_widget_ready, portfolio_error_msg
-    
-    # TEST: Portfolio CSV file existence
-    if not os.path.exists(config.CSV_PATH):
-        portfolio_widget_ready = False
-        portfolio_error_msg = "input.csv not found"
-        print("[WIDGET ERROR - PORTFOLIO]: Input file 'input.csv' not found.")
-    else:
-        portfolio_widget_ready = True
-        portfolio_error_msg = ""
-    
-    # Clock widget no longer has asset test - images are in day/night subfolders
-    # Clock widget is always considered ready
-    global clock_widget_ready, clock_error_msg
-    clock_widget_ready = True
-    clock_error_msg = ""
 
-# ==============================================================================
-# CSV PARSING ENGINE (LEGACY BACKWARD COMPATIBLE)
-# ==============================================================================
+def is_cash_ticker(ticker):
+    """Return True if ticker is a cash/stablecoin (skip API calls)."""
+    ticker_upper = ticker.upper()
+    return any(x in ticker_upper for x in ['USD', 'USDT', 'CASH'])
+
+
+# ── Startup self-tests ──────────────────────────────────────────────────────
+
+def run_startup_self_tests():
+    """Verify prerequisites. Returns (portfolio_ready: bool, error_msg: str)."""
+    if not os.path.exists(config.CSV_PATH):
+        return False, "input.csv not found"
+    return True, ""
+
+
+# ── CSV parser ──────────────────────────────────────────────────────────────
+
 def parse_csv_positions():
-    """Extract positions and start_balance from input.csv"""
+    """Extract positions and start_balance from input.csv."""
     positions = []
     start_balance = 0.0
-    
+
     if not os.path.exists(config.CSV_PATH):
         return positions, start_balance
-    
+
     with open(config.CSV_PATH, 'r', encoding='utf-8-sig') as f:
-        reader = csv.reader(f)
-        rows = list(reader)
-    
-    # Find "Start ball" balance marker
+        rows = list(csv.reader(f))
+
+    # Locate start balance marker
     for i, row in enumerate(rows):
-        if len(row) >= 6 and row[5] == 'Start ball':
+        if len(row) >= 6 and row[COL_START_BALL] == 'Start ball':
             if i + 1 < len(rows):
-                balance_str = rows[i + 1][5].strip()
-                start_balance = clean_numeric_value(balance_str)
+                start_balance = clean_numeric_value(rows[i + 1][COL_START_BALL])
             break
-    
-    # Find position table header
+
+    # Locate position table header
     header_index = -1
     for i, row in enumerate(rows):
-        if len(row) > 2 and row[1] == 'Price' and row[2] == 'My aver':
+        if len(row) > 2 and row[COL_PRICE] == 'Price' and row[COL_AVG] == 'My aver':
             header_index = i + 1
             break
-    
+
     if header_index == -1:
         return positions, start_balance
-    
-    # Parse positions sequentially
+
+    # Parse position rows
     for i in range(header_index, len(rows)):
         row = rows[i]
-        
-        # Break conditions
         if len(row) > 0:
-            if row[0] == 'History' or row[0] == 'Start':
+            if row[0] in ('History', 'Start'):
                 break
             if len(row) > 1 and row[1] == 'Price':
                 break
-        
+
         if len(row) >= 4:
-            ticker = row[0].strip()
+            ticker = row[COL_TICKER].strip()
             if ticker == "":
                 continue
-            
-            csv_price = clean_numeric_value(row[1])
-            avg_price = clean_numeric_value(row[2])
-            quantity = clean_numeric_value(row[3])
-            
             positions.append({
                 "ticker": ticker,
-                "csv_price": csv_price,
-                "avg_price": avg_price,
-                "quantity": quantity
+                "csv_price": clean_numeric_value(row[COL_PRICE]),
+                "avg_price": clean_numeric_value(row[COL_AVG]),
+                "quantity": clean_numeric_value(row[COL_QTY])
             })
-    
+
     return positions, start_balance
 
-# ==============================================================================
-# YAHOO FINANCE API INGESTION (LEGACY REST ENDPOINT)
-# ==============================================================================
+
+# ── Yahoo Finance API ───────────────────────────────────────────────────────
+
 def fetch_yahoo_price(ticker):
-    """Fetch live price from Yahoo Finance REST API. Returns (current_price, prev_close, success_flag)"""
-    url = "https://query1.finance.yahoo.com/v8/finance/chart/" + ticker
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 Safari/537.36'
-    }
-    params = {'range': '2d', 'interval': '1d'}
-    
+    """Fetch live price from Yahoo Finance.
+    Returns (current_price, prev_close, success_flag)."""
+    url = YAHOO_CHART_URL + ticker
+
     try:
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-        
+        response = requests.get(url, headers=YAHOO_HEADERS, params=YAHOO_PARAMS, timeout=10)
         if response.status_code != 200:
             return "N/A", "N/A", False
-        
+
         data = response.json()
-        
-        # Primary extraction path: indicators quote close array
+
+        # Path A: indicators.quote[0].close array
         try:
             closes = data['chart']['result'][0]['indicators']['quote'][0]['close']
             if closes and len(closes) >= 2:
@@ -180,53 +168,38 @@ def fetch_yahoo_price(ticker):
                     return float(current_price), float(prev_close), True
         except (KeyError, IndexError, TypeError):
             pass
-        
-        # Fallback extraction path: meta node
+
+        # Path B: meta node
         try:
             meta = data['chart']['result'][0]['meta']
-            current_price = float(meta['regularMarketPrice'])
-            prev_close = float(meta['previousClose'])
-            return current_price, prev_close, True
+            return float(meta['regularMarketPrice']), float(meta['previousClose']), True
         except (KeyError, IndexError, TypeError, ValueError):
             pass
-        
+
         return "N/A", "N/A", False
-        
+
     except (requests.exceptions.RequestException, ValueError, KeyError, IndexError):
         return "N/A", "N/A", False
 
-# ==============================================================================
-# POSITION CALCULATION ENGINE (PURE FUNCTIONS)
-# ==============================================================================
-def is_cash_ticker(ticker):
-    """Check if ticker represents cash (skip API calls)"""
-    ticker_upper = ticker.upper()
-    return any(x in ticker_upper for x in ['USD', 'USDT', 'CASH'])
 
-# ==============================================================================
-# SQLITE PRICE CACHE FUNCTIONS
-# ==============================================================================
+# ── SQLite price cache ──────────────────────────────────────────────────────
+
 def init_db():
-    """Create prices table if it does not exist"""
-    conn = sqlite3.connect(config.DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS prices (
-        ticker TEXT PRIMARY KEY,
-        current_price REAL,
-        fallback_price REAL,
-        from_input INTEGER DEFAULT 0
-    )''')
-    conn.commit()
-    conn.close()
+    """Create prices table if it does not exist (one-time init)."""
+    with get_db() as conn:
+        conn.execute('''CREATE TABLE IF NOT EXISTS prices (
+            ticker TEXT PRIMARY KEY,
+            current_price REAL,
+            fallback_price REAL,
+            from_input INTEGER DEFAULT 0
+        )''')
+        conn.commit()
 
-def sync_db_from_csv(positions):
-    """Reset from_input flags, then upsert tickers from parsed CSV.
-    Tickers from CSV get from_input=1. Tickers not in CSV stay from_input=0."""
-    conn = sqlite3.connect(config.DB_PATH)
+
+def sync_db_from_csv(conn, positions):
+    """Reset from_input flags, upsert tickers from parsed CSV."""
     c = conn.cursor()
-    # Reset all flags
     c.execute("UPDATE prices SET from_input = 0")
-    # Upsert each ticker from CSV
     for pos in positions:
         ticker = pos['ticker']
         if is_cash_ticker(ticker):
@@ -237,30 +210,37 @@ def sync_db_from_csv(positions):
                          VALUES (?, 0.0, 0.0, 1)''', (ticker,))
             c.execute("UPDATE prices SET from_input = 1 WHERE ticker = ?", (ticker,))
     conn.commit()
-    conn.close()
 
-def prompt_fallback_overrides():
-    """Ask user once to override fallback prices for non-cash tickers"""
-    conn = sqlite3.connect(config.DB_PATH)
+
+def prompt_fallback_overrides(conn):
+    """Interactive prompt to override fallback prices for non-cash tickers.
+    Degrades gracefully when stdin is unavailable (e.g. background launch)."""
     c = conn.cursor()
     c.execute("SELECT ticker, fallback_price FROM prices WHERE from_input = 1")
     rows = c.fetchall()
-    conn.close()
 
     non_cash = [(t, p) for t, p in rows if not is_cash_ticker(t)]
     if not non_cash:
         return
 
-    answer = input("\nOverride fallback prices? (y/n): ").strip().lower()
+    try:
+        answer = input("\nOverride fallback prices? (y/n): ").strip().lower()
+    except (EOFError, OSError):
+        print("(skipping — no interactive input available)")
+        return
+
     if answer != 'y':
         return
 
-    conn = sqlite3.connect(config.DB_PATH)
     c = conn.cursor()
     for ticker, current_fallback in non_cash:
-        prompt_text = ticker + " [fallback: " + str(current_fallback) + "] Enter new price (Enter to keep): "
-        user_input = input(prompt_text).strip()
-        if user_input != "":
+        prompt_text = f"{ticker} [fallback: {current_fallback}] Enter new price (Enter to keep): "
+        try:
+            user_input = input(prompt_text).strip()
+        except (EOFError, OSError):
+            print("(skipping remaining overrides — input unavailable)")
+            break
+        if user_input:
             try:
                 new_price = float(user_input)
                 c.execute('''UPDATE prices SET current_price = ?, fallback_price = ?
@@ -268,129 +248,95 @@ def prompt_fallback_overrides():
             except ValueError:
                 print("  Invalid number, keeping existing.")
     conn.commit()
-    conn.close()
 
-def rotate_db_price(ticker, new_price):
-    """Move current_price to fallback_price, write new API price to current_price"""
-    conn = sqlite3.connect(config.DB_PATH)
-    c = conn.cursor()
-    c.execute('''UPDATE prices
-                 SET fallback_price = current_price, current_price = ?
-                 WHERE ticker = ?''', (new_price, ticker))
+
+def rotate_db_price(conn, ticker, new_price):
+    """Shift current_price → fallback_price, write new API price."""
+    conn.execute('''UPDATE prices
+                    SET fallback_price = current_price, current_price = ?
+                    WHERE ticker = ?''', (new_price, ticker))
     conn.commit()
-    conn.close()
 
-def get_fallback_price(ticker):
-    """Return fallback_price from DB, or None if ticker not found"""
-    conn = sqlite3.connect(config.DB_PATH)
+
+def get_fallback_price(conn, ticker):
+    """Return fallback_price from DB, or None if ticker not found."""
     c = conn.cursor()
     c.execute("SELECT fallback_price FROM prices WHERE ticker = ?", (ticker,))
     row = c.fetchone()
-    conn.close()
-    if row:
-        return row[0]
-    return None
+    return row[0] if row else None
+
+
+# ── Position calculations ───────────────────────────────────────────────────
+
+def _pos_dict(ticker, last_price, avg_price, quantity,
+              current_value, invested_value, pnl, pnl_pct):
+    """Build position result dict — single source of truth for output shape."""
+    return {
+        "ticker": ticker,
+        "last_price": last_price,
+        "avg_price": avg_price,
+        "quantity": quantity,
+        "current_value": current_value,
+        "invested_value": invested_value,
+        "pnl": pnl,
+        "pnl_pct": pnl_pct
+    }
+
 
 def calculate_position(position, current_price, prev_close):
-    """Calculate all financial metrics for a single position"""
+    """Compute financial metrics for one position.
+    Returns (result_dict, success_bool)."""
     ticker = position['ticker']
-    avg_price = position['avg_price']
-    quantity = position['quantity']
-    
-    # Cash position handling
-    if is_cash_ticker(ticker):
-        last_price = 1.0
-        current_value = position['csv_price'] * quantity
-        invested_value = avg_price * quantity
-        pnl = 0.0
-        pnl_pct = 0.0
-        return {
-            "ticker": ticker,
-            "last_price": last_price,
-            "avg_price": avg_price,
-            "quantity": quantity,
-            "current_value": current_value,
-            "invested_value": invested_value,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct
-        }, True
-    
-    # Stock/ETF position with valid price
-    if current_price != "N/A" and isinstance(current_price, (int, float)):
-        last_price = current_price
-        current_value = current_price * quantity
-        invested_value = avg_price * quantity
-        
-        if quantity < 0:  # Short position
-            pnl = (avg_price - current_price) * abs(quantity)
-            if avg_price != 0:
-                pnl_pct = ((avg_price - current_price) / avg_price) * 100.0
-            else:
-                pnl_pct = 0.0
-        else:  # Long position
-            pnl = (current_price - avg_price) * quantity
-            if avg_price != 0:
-                pnl_pct = ((current_price - avg_price) / avg_price) * 100.0
-            else:
-                pnl_pct = 0.0
-        
-        return {
-            "ticker": ticker,
-            "last_price": last_price,
-            "avg_price": avg_price,
-            "quantity": quantity,
-            "current_value": current_value,
-            "invested_value": invested_value,
-            "pnl": pnl,
-            "pnl_pct": pnl_pct
-        }, True
-    else:
-        # API failure fallback
-        return {
-            "ticker": ticker,
-            "last_price": "N/A",
-            "avg_price": avg_price,
-            "quantity": quantity,
-            "current_value": 0.0,
-            "invested_value": 0.0,
-            "pnl": 0.0,
-            "pnl_pct": 0.0
-        }, False
+    avg = position['avg_price']
+    qty = position['quantity']
 
-# ==============================================================================
-# AGGREGATION AND TOTALS CALCULATION
-# ==============================================================================
+    # Cash position
+    if is_cash_ticker(ticker):
+        return _pos_dict(ticker, 1.0, avg, qty,
+                         position['csv_price'] * qty, avg * qty,
+                         0.0, 0.0), True
+
+    # API failure — no usable price
+    if current_price == "N/A" or not isinstance(current_price, (int, float)):
+        return _pos_dict(ticker, "N/A", avg, qty, 0.0, 0.0, 0.0, 0.0), False
+
+    # Live position (long or short)
+    current_value = current_price * qty
+    invested_value = avg * qty
+
+    if qty < 0:
+        # Short position — profit when price drops below average
+        pnl = (avg - current_price) * abs(qty)
+        pnl_pct = ((avg - current_price) / avg) * 100.0 if avg != 0 else 0.0
+    else:
+        # Long position — profit when price rises above average
+        pnl = (current_price - avg) * qty
+        pnl_pct = ((current_price - avg) / avg) * 100.0 if avg != 0 else 0.0
+
+    return _pos_dict(ticker, current_price, avg, qty,
+                     current_value, invested_value, pnl, pnl_pct), True
+
+
 def calculate_totals(positions_data, start_balance):
-    """Aggregate totals from all positions"""
-    total_current_value = 0.0
-    total_invested = 0.0
-    total_pnl = 0.0
-    
-    # Weighted average P&L percentage calculation
-    weighted_pnl_pct_sum = 0.0
-    total_invested_for_pct = 0.0
-    
+    """Aggregate totals across all positions with weighted-average P&L%."""
+    total_current_value = sum(p['current_value'] for p in positions_data)
+    total_invested = sum(p['invested_value'] for p in positions_data)
+    total_pnl = sum(p['pnl'] for p in positions_data)
+
+    # Weighted-average P&L percentage
+    weighted_sum = 0.0
+    weight_total = 0.0
     for pos in positions_data:
-        total_current_value += pos['current_value']
-        total_invested += pos['invested_value']
-        total_pnl += pos['pnl']
-        
         if pos['invested_value'] != 0 and pos['pnl_pct'] != 0:
-            weighted_pnl_pct_sum += pos['pnl_pct'] * abs(pos['invested_value'])
-            total_invested_for_pct += abs(pos['invested_value'])
-    
-    if total_invested_for_pct != 0:
-        total_pnl_pct = weighted_pnl_pct_sum / total_invested_for_pct
-    else:
-        total_pnl_pct = 0.0
-    
-    # Calculate actual P&L from start balance
+            weighted_sum += pos['pnl_pct'] * abs(pos['invested_value'])
+            weight_total += abs(pos['invested_value'])
+
+    total_pnl_pct = weighted_sum / weight_total if weight_total != 0 else 0.0
+
+    # Actual P&L vs start balance
     actual_pnl_usd = total_current_value - start_balance
-    if start_balance != 0:
-        actual_pnl_pct = (actual_pnl_usd / start_balance) * 100.0
-    else:
-        actual_pnl_pct = 0.0
-    
+    actual_pnl_pct = (actual_pnl_usd / start_balance) * 100.0 if start_balance != 0 else 0.0
+
     return {
         "total_current_value": total_current_value,
         "total_invested": total_invested,
@@ -401,145 +347,133 @@ def calculate_totals(positions_data, start_balance):
         "actual_pnl_pct": actual_pnl_pct
     }
 
-# ==============================================================================
-# MAIN DATA COLLECTION PIPELINE
-# ==============================================================================
-def collect_portfolio_data():
-    """Orchestrate full data collection: CSV parse -> API fetch -> Calculate -> Return JSON-ready dict"""
-    # Parse CSV
-    positions_raw, start_balance = parse_csv_positions()
-    
-    if not positions_raw:
-        return {
-            "network_status": "offline",
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "widget_errors": {
-                "portfolio": portfolio_error_msg,
-                "clock": clock_error_msg
-            },
-            "totals": {
-                "total_current_value": 0.0,
-                "total_invested": 0.0,
-                "total_pnl": 0.0,
-                "total_pnl_pct": 0.0,
-                "start_balance": start_balance,
-                "actual_pnl_usd": 0.0,
-                "actual_pnl_pct": 0.0
-            },
-            "positions": []
-        }
 
-    # Sync DB with current CSV tickers
-    sync_db_from_csv(positions_raw)
+# ── Data pipeline ───────────────────────────────────────────────────────────
 
-    # Fetch prices and calculate positions
-    positions_data = []
-    network_online = True
+def _process_position(conn, pos):
+    """Fetch price (API or cache) and calculate one position.
+    Returns position dict with 'online' flag set."""
+    ticker = pos['ticker']
 
-    for pos in positions_raw:
-        ticker = pos['ticker']
+    if is_cash_ticker(ticker):
+        calculated, _ = calculate_position(pos, 1.0, 1.0)
+        calculated['online'] = True
+        return calculated
 
-        if is_cash_ticker(ticker):
-            calculated, _ = calculate_position(pos, 1.0, 1.0)
-            calculated['online'] = True
-            positions_data.append(calculated)
-        else:
-            current_price, prev_close, api_success = fetch_yahoo_price(ticker)
-            if api_success:
-                rotate_db_price(ticker, current_price)
-                calculated, _ = calculate_position(pos, current_price, prev_close)
-                calculated['online'] = True
-            else:
-                network_online = False
-                print("[API WARNING]: Failed to fetch live data for ticker " + ticker + ". Using fallback price.")
-                fallback = get_fallback_price(ticker)
-                if fallback is not None and fallback != 0.0:
-                    calculated, _ = calculate_position(pos, fallback, fallback)
-                else:
-                    calculated, _ = calculate_position(pos, "N/A", "N/A")
-                calculated['online'] = False
-            positions_data.append(calculated)
-    
-    # Calculate totals
-    totals = calculate_totals(positions_data, start_balance)
-    
-    # Build final payload
+    current_price, prev_close, api_ok = fetch_yahoo_price(ticker)
+    if api_ok:
+        rotate_db_price(conn, ticker, current_price)
+        calculated, _ = calculate_position(pos, current_price, prev_close)
+        calculated['online'] = True
+        return calculated
+
+    print(f"[API WARNING]: No live data for {ticker}, using fallback price.")
+    fallback = get_fallback_price(conn, ticker)
+    if fallback is not None and fallback != 0.0:
+        calculated, _ = calculate_position(pos, fallback, fallback)
+    else:
+        calculated, _ = calculate_position(pos, "N/A", "N/A")
+    calculated['online'] = False
+    return calculated
+
+
+def _empty_payload(start_balance):
+    """Payload returned when CSV is empty or missing."""
+    return {
+        "network_status": "offline",
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "widget_errors": {"portfolio": _portfolio_error, "clock": _clock_error},
+        "totals": {
+            "total_current_value": 0.0, "total_invested": 0.0,
+            "total_pnl": 0.0, "total_pnl_pct": 0.0,
+            "start_balance": start_balance,
+            "actual_pnl_usd": 0.0, "actual_pnl_pct": 0.0
+        },
+        "positions": []
+    }
+
+
+def _build_payload(network_online, totals, positions_data):
+    """Assemble the final JSON-ready portfolio payload."""
     return {
         "network_status": "online" if network_online else "offline",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "widget_errors": {
-            "portfolio": portfolio_error_msg,
-            "clock": clock_error_msg
-        },
+        "widget_errors": {"portfolio": _portfolio_error, "clock": _clock_error},
         "totals": totals,
         "positions": positions_data
     }
 
-# ==============================================================================
-# FLASK ROUTES
-# ==============================================================================
+
+def collect_portfolio_data():
+    """Orchestrate full data pipeline: CSV → API → cache → calculate → JSON."""
+    positions_raw, start_balance = parse_csv_positions()
+
+    if not positions_raw:
+        return _empty_payload(start_balance)
+
+    with get_db() as conn:
+        sync_db_from_csv(conn, positions_raw)
+        positions_data = [_process_position(conn, p) for p in positions_raw]
+
+    network_online = all(p.get('online', False) for p in positions_data)
+    totals = calculate_totals(positions_data, start_balance)
+    return _build_payload(network_online, totals, positions_data)
+
+
+# ── Flask routes ────────────────────────────────────────────────────────────
+
 @app.route('/')
 def index():
-    """Main dashboard route - injects config and widget error states"""
+    """Main dashboard — injects config and widget error states via Jinja2."""
     return render_template('index.html',
-                         BACKGROUND_TYPE=config.BACKGROUND_TYPE,
-                         BACKGROUND_COLOR=config.BACKGROUND_COLOR,
-                         BACKGROUND_IMAGE_FILE=config.BACKGROUND_IMAGE_FILE,
-                         BACKGROUND_VIDEO_FILE=config.BACKGROUND_VIDEO_FILE,
-                         TABLE_WIDGET_WIDTH=config.TABLE_WIDGET_WIDTH,
-                         TABLE_FONT_SIZE=config.TABLE_FONT_SIZE,
-                         TABLE_BACKGROUND_COLOR=config.TABLE_BACKGROUND_COLOR,
-                         TABLE_TEXT_DEFAULT_COLOR=config.TABLE_TEXT_DEFAULT_COLOR,
-                         TABLE_HEADER_TEXT_COLOR=config.TABLE_HEADER_TEXT_COLOR,
-                         TABLE_BORDER_COLOR=config.TABLE_BORDER_COLOR,
-                         CLOCK_DIGIT_WIDTH=config.CLOCK_DIGIT_WIDTH,
-                         CLOCK_DIGIT_HEIGHT=config.CLOCK_DIGIT_HEIGHT,
-                         CLOCK_WIDGET_MARGIN_TOP=config.CLOCK_WIDGET_MARGIN_TOP,
-                         DATA_REFRESH_INTERVAL_MS=config.DATA_REFRESH_INTERVAL_MS,
-                         portfolio_error=portfolio_error_msg if not portfolio_widget_ready else "",
-                         clock_error=clock_error_msg if not clock_widget_ready else "")
+                           BACKGROUND_TYPE=config.BACKGROUND_TYPE,
+                           BACKGROUND_COLOR=config.BACKGROUND_COLOR,
+                           BACKGROUND_IMAGE_FILE=config.BACKGROUND_IMAGE_FILE,
+                           BACKGROUND_VIDEO_FILE=config.BACKGROUND_VIDEO_FILE,
+                           TABLE_WIDGET_WIDTH=config.TABLE_WIDGET_WIDTH,
+                           TABLE_FONT_SIZE=config.TABLE_FONT_SIZE,
+                           TABLE_BACKGROUND_COLOR=config.TABLE_BACKGROUND_COLOR,
+                           TABLE_TEXT_DEFAULT_COLOR=config.TABLE_TEXT_DEFAULT_COLOR,
+                           TABLE_HEADER_TEXT_COLOR=config.TABLE_HEADER_TEXT_COLOR,
+                           TABLE_BORDER_COLOR=config.TABLE_BORDER_COLOR,
+                           CLOCK_DIGIT_WIDTH=config.CLOCK_DIGIT_WIDTH,
+                           CLOCK_DIGIT_HEIGHT=config.CLOCK_DIGIT_HEIGHT,
+                           CLOCK_WIDGET_MARGIN_TOP=config.CLOCK_WIDGET_MARGIN_TOP,
+                           DATA_REFRESH_INTERVAL_MS=config.DATA_REFRESH_INTERVAL_MS,
+                           portfolio_error=_portfolio_error if not _portfolio_ready else "",
+                           clock_error=_clock_error if not _clock_ready else "")
+
 
 @app.route('/api/data')
 def api_data():
-    """Real-time JSON data endpoint for AJAX polling"""
-    data_payload = collect_portfolio_data()
-    return jsonify(data_payload)
+    """Portfolio JSON endpoint polled by frontend."""
+    return jsonify(collect_portfolio_data())
 
-# ==============================================================================
-# HEARTBEAT ENDPOINT (FRONTEND SERVER-STATUS CHECK)
-# ==============================================================================
+
 @app.route('/api/ping')
 def ping():
-    """Lightweight heartbeat — frontend checks this every 5s to detect server down"""
+    """Lightweight heartbeat for frontend server-down detection."""
     return jsonify({"status": "ok"})
 
-# ==============================================================================
-# CLOCK TIME ENDPOINT (ADDED FOR STABLE TIME SYNC)
-# ==============================================================================
+
 @app.route('/api/time')
 def get_server_time():
-    """Return current server time and day/night mode for clock widget"""
+    """Return server time and day/night mode for the clock widget."""
     now = datetime.now()
-    hours = now.hour
-    minutes = now.minute
-    
-    # Format hours and minutes as two-digit strings
-    hours_str = ("0" + str(hours)) if hours < 10 else str(hours)
-    minutes_str = ("0" + str(minutes)) if minutes < 10 else str(minutes)
-    
-    # Determine if day or night mode using hours AND minutes
-    # Convert current time to total minutes since midnight for easier comparison
-    current_total_minutes = (hours * 60) + minutes
-    day_start_total_minutes = (config.DAY_START_HOUR * 60) + config.DAY_START_MINUTE
-    day_end_total_minutes = (config.DAY_END_HOUR * 60) + config.DAY_END_MINUTE
-    
-    if day_start_total_minutes <= current_total_minutes < day_end_total_minutes:
-        clock_mode = "day"
-    else:
-        clock_mode = "night"
-    
-    print("[CLOCK DEBUG]: Server time is " + hours_str + ":" + minutes_str + " - mode: " + clock_mode)
-    
+    hours, minutes = now.hour, now.minute
+
+    hours_str = f"0{hours}" if hours < 10 else str(hours)
+    minutes_str = f"0{minutes}" if minutes < 10 else str(minutes)
+
+    # Day/night mode from config thresholds
+    current_minutes = hours * 60 + minutes
+    day_start = config.DAY_START_HOUR * 60 + config.DAY_START_MINUTE
+    day_end = config.DAY_END_HOUR * 60 + config.DAY_END_MINUTE
+
+    clock_mode = "day" if day_start <= current_minutes < day_end else "night"
+
+    print(f"[CLOCK DEBUG]: Server time is {hours_str}:{minutes_str} - mode: {clock_mode}")
+
     return jsonify({
         "hours": hours,
         "minutes": minutes,
@@ -548,47 +482,64 @@ def get_server_time():
         "clock_mode": clock_mode
     })
 
-# ==============================================================================
-# APPLICATION ENTRY POINT
-# ==============================================================================
+
+# ── Entry point ─────────────────────────────────────────────────────────────
+
+def _seed_cache():
+    """Populate DB from CSV on first run; optionally prompt for overrides."""
+    positions_init, _ = parse_csv_positions()
+    if positions_init:
+        with get_db() as conn:
+            sync_db_from_csv(conn, positions_init)
+            prompt_fallback_overrides(conn)
+
+
+def _print_banner(portfolio_ready, portfolio_error):
+    """Print startup status banner."""
+    print("=" * 50)
+    print("PORTFOLIO DASHBOARD SERVER")
+    print("=" * 50)
+    print("Widget Status:")
+    print(f"  - Portfolio Widget: {'READY' if portfolio_ready else 'FAILED'}")
+    if not portfolio_ready:
+        print(f"    ({portfolio_error})")
+    print("  - Clock Widget: READY")
+    print(f"  - Background Type: {config.BACKGROUND_TYPE}")
+    print(f"  - Polling Interval: {config.DATA_REFRESH_INTERVAL_MS}ms")
+    print("=" * 50)
+    print("Starting Flask server on http://127.0.0.1:5000")
+    print("Press CTRL+C to stop")
+    print("=" * 50)
+
+
+def _api_smoke_test():
+    """Pre-flight check: can we reach Yahoo Finance?"""
+    print("Running API smoke test (SPY)...")
+    price, _, ok = fetch_yahoo_price("SPY")
+    if ok:
+        print(f"[OK] Yahoo Finance reachable. SPY = {price}")
+    else:
+        print("[WARN] Yahoo Finance unreachable — all tickers will use fallback prices.")
+    return ok
+
+
 if __name__ == '__main__':
     try:
-        # Run startup self-tests before booting server
-        run_startup_self_tests()
-
-        # Initialize SQLite price cache
+        _portfolio_ready, _portfolio_error = run_startup_self_tests()
         init_db()
-        positions_init, _ = parse_csv_positions()
-        if positions_init:
-            sync_db_from_csv(positions_init)
-            prompt_fallback_overrides()
+        _seed_cache()
+        _api_smoke_test()
+        _print_banner(_portfolio_ready, _portfolio_error)
 
-        # Print startup confirmation
-        print("=" * 50)
-        print("PORTFOLIO DASHBOARD SERVER")
-        print("=" * 50)
-        print("Widget Status:")
-        print("  - Portfolio Widget: " + ("READY" if portfolio_widget_ready else "FAILED"))
-        print("  - Clock Widget: " + ("READY" if clock_widget_ready else "FAILED"))
-        print("  - Background Type: " + config.BACKGROUND_TYPE)
-        print("  - Polling Interval: " + str(config.DATA_REFRESH_INTERVAL_MS) + "ms")
-        print("=" * 50)
-        print("Starting Flask server on http://127.0.0.1:5000")
-        print("Press CTRL+C to stop")
-        print("=" * 50)
-        
-        # Single-threaded Flask server for Atom CPU
-        # ==============================================================================
         app.run(host='0.0.0.0', port=5000, threaded=False, debug=False)
-        
+
     except Exception as e:
-        print("\n" + "=" * 50)
-        print("FATAL ERROR:")
-        print("=" * 50)
-        print(str(e))
-        print("=" * 50)
-    
+        print(f"\n{'=' * 50}\nFATAL ERROR:\n{'=' * 50}\n{e}\n{'=' * 50}")
+
     finally:
-        print("\n" + "=" * 50)
-        input("Press ENTER to close this window...")
+        print(f"\n{'=' * 50}")
+        try:
+            input("Press ENTER to close this window...")
+        except (EOFError, OSError):
+            pass
         print("=" * 50)

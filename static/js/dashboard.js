@@ -6,7 +6,7 @@ var currentClockMode = "night";
 function fetchServerTime() {
     var xhr = new XMLHttpRequest();
     xhr.open("GET", "/api/time", true);
-    
+
     xhr.onreadystatechange = function() {
         if (xhr.readyState === 4) {
             if (xhr.status === 200) {
@@ -22,11 +22,11 @@ function fetchServerTime() {
             }
         }
     };
-    
+
     xhr.onerror = function() {
         console.log("Network error fetching server time");
     };
-    
+
     xhr.send();
 }
 
@@ -36,18 +36,15 @@ function updateClockImages(hours_str, minutes_str, clock_mode) {
     var m1 = document.getElementById("clk-m1");
     var m2 = document.getElementById("clk-m2");
     var colon = document.getElementById("clk-colon");
-    
+
     if (h1 && h2 && m1 && m2 && colon) {
         h1.src = "/static/digits/" + clock_mode + "/" + hours_str.charAt(0) + ".png";
         h2.src = "/static/digits/" + clock_mode + "/" + hours_str.charAt(1) + ".png";
         m1.src = "/static/digits/" + clock_mode + "/" + minutes_str.charAt(0) + ".png";
         m2.src = "/static/digits/" + clock_mode + "/" + minutes_str.charAt(1) + ".png";
-        
-        // Store colon paths for blinking
+
         colon.colonVisiblePath = "/static/digits/" + clock_mode + "/colon.png";
         colon.colonBlankPath = "/static/digits/" + clock_mode + "/colon_blank.png";
-        
-        // Start with visible colon
         colon.src = colon.colonVisiblePath;
         colonVisible = true;
     }
@@ -57,18 +54,14 @@ function blinkColon() {
     var colon = document.getElementById("clk-colon");
     if (colon && colon.colonVisiblePath && colon.colonBlankPath) {
         colonVisible = !colonVisible;
-        if (colonVisible) {
-            colon.src = colon.colonVisiblePath;
-        } else {
-            colon.src = colon.colonBlankPath;
-        }
+        colon.src = colonVisible ? colon.colonVisiblePath : colon.colonBlankPath;
     }
 }
 
 function requestPortfolioDataUpdate() {
     var xhr = new XMLHttpRequest();
     xhr.open("GET", "/api/data", true);
-    
+
     xhr.onreadystatechange = function() {
         if (xhr.readyState === 4) {
             if (xhr.status === 200) {
@@ -83,11 +76,11 @@ function requestPortfolioDataUpdate() {
             }
         }
     };
-    
+
     xhr.onerror = function() {
         switchToFallbackState();
     };
-    
+
     xhr.send();
 }
 
@@ -146,13 +139,12 @@ function processInterfaceRender(data) {
 }
 
 function switchToFallbackState() {
-    // Keep last data. Heartbeat checker handles real server-down detection.
+    // Keep last rendered data on screen. Heartbeat handles real server-down detection.
     console.log("Portfolio data fetch failed. Keeping last known display.");
 }
 
-// ==============================================================================
-// SERVER HEARTBEAT CHECK (detects Flask down, shows warning overlay)
-// ==============================================================================
+// ── Server heartbeat ───────────────────────────────────────────────────────
+
 var HEARTBEAT_INTERVAL_MS = 5000;
 var serverDown = false;
 
@@ -169,7 +161,6 @@ function hideServerDownOverlay() {
         serverDown = false;
         var overlay = document.getElementById("server-down-overlay");
         if (overlay) overlay.style.display = "none";
-        // Re-fetch everything on recovery
         requestPortfolioDataUpdate();
         fetchServerTime();
     }
@@ -201,19 +192,13 @@ function checkServerHeartbeat() {
     xhr.send();
 }
 
-// Blinking colon: toggle between colon.png and colon_blank.png every 500ms
+// Polling loops
 setInterval(blinkColon, 500);
-
-// Clock: poll server every 15 seconds for accurate time
 setInterval(fetchServerTime, CLOCK_POLLING_INTERVAL_MS);
-
-// Portfolio: poll server every 10 seconds for data
 setInterval(requestPortfolioDataUpdate, POLLING_INTERVAL_MS);
-
-// Heartbeat: check server status every 5 seconds
 setInterval(checkServerHeartbeat, HEARTBEAT_INTERVAL_MS);
 
-// Initial calls on page load
+// Initial fetch on page load
 checkServerHeartbeat();
 fetchServerTime();
 requestPortfolioDataUpdate();

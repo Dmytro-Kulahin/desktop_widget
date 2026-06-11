@@ -8,17 +8,15 @@
         body {
             background-color: {{ BACKGROUND_COLOR }};
         }
-        
 
         #widget-clock-container {
             margin-top: {{ CLOCK_WIDGET_MARGIN_TOP }};
         }
-        
+
         #widget-clock-container img {
             width: {{ CLOCK_DIGIT_WIDTH }};
             height: {{ CLOCK_DIGIT_HEIGHT }};
         }
-
 
         #widget-portfolio-container {
             width: {{ TABLE_WIDGET_WIDTH }};
@@ -26,19 +24,16 @@
             font-size: {{ TABLE_FONT_SIZE }};
             color: {{ TABLE_TEXT_DEFAULT_COLOR }};
         }
-        
+
         #widget-portfolio-table th {
             color: {{ TABLE_HEADER_TEXT_COLOR }};
         }
-        
+
         #widget-portfolio-table,
         #widget-portfolio-table td,
         #widget-portfolio-table th {
             border: 1px solid {{ TABLE_BORDER_COLOR }};
         }
-        
-
-
     </style>
 </head>
 <body>
@@ -63,7 +58,6 @@
 
     <div id="dashboard-center-alignment-zone">
 
-
         <div id="widget-clock-container">
             {% if clock_error %}
             <div class="widget-error-fallback">[Widget Error: {{ clock_error }}]</div>
@@ -76,9 +70,7 @@
             {% endif %}
         </div>
 
-        <div empty space between widgets> <br><br><br><br> </div>
-
-
+        <div><br><br><br><br></div>
 
         <div id="widget-portfolio-container">
             {% if portfolio_error %}
@@ -92,8 +84,6 @@
             </div>
             {% endif %}
         </div>
-
-
 
     </div>
 
