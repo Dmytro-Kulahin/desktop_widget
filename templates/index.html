@@ -43,6 +43,14 @@
 </head>
 <body>
 
+    <div id="server-down-overlay" style="display:none;">
+        <div id="server-down-box">
+            <span id="server-down-icon">&#9888;</span>
+            <p id="server-down-title">Server Connection Lost</p>
+            <p id="server-down-sub">Flask backend is not responding.<br>Check if app.py is still running.</p>
+        </div>
+    </div>
+
     {% if BACKGROUND_TYPE == "image" %}
     <img src="/static/bg/{{ BACKGROUND_IMAGE_FILE }}" id="layout-backdrop" />
     {% elif BACKGROUND_TYPE == "video" %}

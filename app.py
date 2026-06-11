@@ -39,6 +39,7 @@ from datetime import datetime
 from flask import Flask, render_template, jsonify
 
 import config
+import sqlite3
 
 # ==============================================================================
 # FLASK APPLICATION INSTANCE (SINGLE-THREADED)
@@ -202,6 +203,94 @@ def is_cash_ticker(ticker):
     ticker_upper = ticker.upper()
     return any(x in ticker_upper for x in ['USD', 'USDT', 'CASH'])
 
+# ==============================================================================
+# SQLITE PRICE CACHE FUNCTIONS
+# ==============================================================================
+def init_db():
+    """Create prices table if it does not exist"""
+    conn = sqlite3.connect(config.DB_PATH)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS prices (
+        ticker TEXT PRIMARY KEY,
+        current_price REAL,
+        fallback_price REAL,
+        from_input INTEGER DEFAULT 0
+    )''')
+    conn.commit()
+    conn.close()
+
+def sync_db_from_csv(positions):
+    """Reset from_input flags, then upsert tickers from parsed CSV.
+    Tickers from CSV get from_input=1. Tickers not in CSV stay from_input=0."""
+    conn = sqlite3.connect(config.DB_PATH)
+    c = conn.cursor()
+    # Reset all flags
+    c.execute("UPDATE prices SET from_input = 0")
+    # Upsert each ticker from CSV
+    for pos in positions:
+        ticker = pos['ticker']
+        if is_cash_ticker(ticker):
+            c.execute('''INSERT OR REPLACE INTO prices (ticker, current_price, fallback_price, from_input)
+                         VALUES (?, 1.0, 1.0, 1)''', (ticker,))
+        else:
+            c.execute('''INSERT OR IGNORE INTO prices (ticker, current_price, fallback_price, from_input)
+                         VALUES (?, 0.0, 0.0, 1)''', (ticker,))
+            c.execute("UPDATE prices SET from_input = 1 WHERE ticker = ?", (ticker,))
+    conn.commit()
+    conn.close()
+
+def prompt_fallback_overrides():
+    """Ask user once to override fallback prices for non-cash tickers"""
+    conn = sqlite3.connect(config.DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT ticker, fallback_price FROM prices WHERE from_input = 1")
+    rows = c.fetchall()
+    conn.close()
+
+    non_cash = [(t, p) for t, p in rows if not is_cash_ticker(t)]
+    if not non_cash:
+        return
+
+    answer = input("\nOverride fallback prices? (y/n): ").strip().lower()
+    if answer != 'y':
+        return
+
+    conn = sqlite3.connect(config.DB_PATH)
+    c = conn.cursor()
+    for ticker, current_fallback in non_cash:
+        prompt_text = ticker + " [fallback: " + str(current_fallback) + "] Enter new price (Enter to keep): "
+        user_input = input(prompt_text).strip()
+        if user_input != "":
+            try:
+                new_price = float(user_input)
+                c.execute('''UPDATE prices SET current_price = ?, fallback_price = ?
+                             WHERE ticker = ?''', (new_price, new_price, ticker))
+            except ValueError:
+                print("  Invalid number, keeping existing.")
+    conn.commit()
+    conn.close()
+
+def rotate_db_price(ticker, new_price):
+    """Move current_price to fallback_price, write new API price to current_price"""
+    conn = sqlite3.connect(config.DB_PATH)
+    c = conn.cursor()
+    c.execute('''UPDATE prices
+                 SET fallback_price = current_price, current_price = ?
+                 WHERE ticker = ?''', (new_price, ticker))
+    conn.commit()
+    conn.close()
+
+def get_fallback_price(ticker):
+    """Return fallback_price from DB, or None if ticker not found"""
+    conn = sqlite3.connect(config.DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT fallback_price FROM prices WHERE ticker = ?", (ticker,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return row[0]
+    return None
+
 def calculate_position(position, current_price, prev_close):
     """Calculate all financial metrics for a single position"""
     ticker = position['ticker']
@@ -339,25 +428,36 @@ def collect_portfolio_data():
             },
             "positions": []
         }
-    
+
+    # Sync DB with current CSV tickers
+    sync_db_from_csv(positions_raw)
+
     # Fetch prices and calculate positions
     positions_data = []
     network_online = True
-    
+
     for pos in positions_raw:
         ticker = pos['ticker']
-        
+
         if is_cash_ticker(ticker):
-            # Cash position: skip API
-            calculated, success = calculate_position(pos, 1.0, 1.0)
+            calculated, _ = calculate_position(pos, 1.0, 1.0)
+            calculated['online'] = True
             positions_data.append(calculated)
         else:
-            # Fetch from Yahoo
-            current_price, prev_close, success = fetch_yahoo_price(ticker)
-            if not success:
+            current_price, prev_close, api_success = fetch_yahoo_price(ticker)
+            if api_success:
+                rotate_db_price(ticker, current_price)
+                calculated, _ = calculate_position(pos, current_price, prev_close)
+                calculated['online'] = True
+            else:
                 network_online = False
-                print("[API WARNING]: Failed to fetch live data for ticker " + ticker + ". Switching to fallback state.")
-            calculated, _ = calculate_position(pos, current_price, prev_close)
+                print("[API WARNING]: Failed to fetch live data for ticker " + ticker + ". Using fallback price.")
+                fallback = get_fallback_price(ticker)
+                if fallback is not None and fallback != 0.0:
+                    calculated, _ = calculate_position(pos, fallback, fallback)
+                else:
+                    calculated, _ = calculate_position(pos, "N/A", "N/A")
+                calculated['online'] = False
             positions_data.append(calculated)
     
     # Calculate totals
@@ -406,6 +506,14 @@ def api_data():
     return jsonify(data_payload)
 
 # ==============================================================================
+# HEARTBEAT ENDPOINT (FRONTEND SERVER-STATUS CHECK)
+# ==============================================================================
+@app.route('/api/ping')
+def ping():
+    """Lightweight heartbeat — frontend checks this every 5s to detect server down"""
+    return jsonify({"status": "ok"})
+
+# ==============================================================================
 # CLOCK TIME ENDPOINT (ADDED FOR STABLE TIME SYNC)
 # ==============================================================================
 @app.route('/api/time')
@@ -447,7 +555,14 @@ if __name__ == '__main__':
     try:
         # Run startup self-tests before booting server
         run_startup_self_tests()
-        
+
+        # Initialize SQLite price cache
+        init_db()
+        positions_init, _ = parse_csv_positions()
+        if positions_init:
+            sync_db_from_csv(positions_init)
+            prompt_fallback_overrides()
+
         # Print startup confirmation
         print("=" * 50)
         print("PORTFOLIO DASHBOARD SERVER")

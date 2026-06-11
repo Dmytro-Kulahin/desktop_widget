@@ -5,6 +5,7 @@ import os
 # ==============================================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CSV_PATH = os.path.join(BASE_DIR, "input.csv")
+DB_PATH = os.path.join(BASE_DIR, "prices.db")
 CLOCK_ASSET_DIR = os.path.join(BASE_DIR, "static", "digits")
 BACKGROUND_ASSET_DIR = os.path.join(BASE_DIR, "static", "bg")
 
@@ -19,7 +20,7 @@ DAY_END_MINUTE = 00     # Night starts at
 # ==============================================================================
 # SYSTEM ENGINE SETTINGS
 # ==============================================================================
-DATA_REFRESH_INTERVAL_MS = 10000
+DATA_REFRESH_INTERVAL_MS = 30000
 
 # ==============================================================================
 # VISUAL LOOK AND FEEL CONFIGURATION (COSMETIC ENGINE)

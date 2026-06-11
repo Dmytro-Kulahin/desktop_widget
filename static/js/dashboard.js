@@ -92,19 +92,11 @@ function requestPortfolioDataUpdate() {
 }
 
 function processInterfaceRender(data) {
-    var indicator = document.getElementById("network-status-indicator");
-    
-    if (data.network_status === "offline") {
-        if (indicator) indicator.style.display = "block";
-    } else {
-        if (indicator) indicator.style.display = "none";
-    }
-    
     var table = document.getElementById("widget-portfolio-table");
     var summary = document.getElementById("portfolio-summary-row");
-    
+
     if (!table) return;
-    
+
     var html = "<tr>" +
         "<th>Ticker</th>" +
         "<th>Price</th>" +
@@ -115,10 +107,10 @@ function processInterfaceRender(data) {
         "<th>P&L</th>" +
         "<th>P&L%</th>" +
         "</tr>";
-    
+
     for (var i = 0; i < data.positions.length; i++) {
         var pos = data.positions[i];
-        
+
         var priceText = (pos.last_price === "N/A") ? "N/A" : Number(pos.last_price).toFixed(2);
         var avgText = Number(pos.avg_price).toFixed(2);
         var qtyText = Number(pos.quantity).toFixed(0);
@@ -126,12 +118,14 @@ function processInterfaceRender(data) {
         var invText = Number(pos.invested_value).toFixed(2);
         var pnlText = Number(pos.pnl).toFixed(2);
         var pnlPctText = Number(pos.pnl_pct).toFixed(2) + "%";
-        
+
         var pnlClass = "pnl-neutral";
         if (pos.pnl > 0) pnlClass = "pnl-positive";
         else if (pos.pnl < 0) pnlClass = "pnl-negative";
-        
-        html += "<tr>" +
+
+        var rowClass = pos.online ? "" : "offline-row";
+
+        html += "<tr class='" + rowClass + "'>" +
             "<td>" + pos.ticker + "</td>" +
             "<td>" + priceText + "</td>" +
             "<td>" + avgText + "</td>" +
@@ -142,9 +136,9 @@ function processInterfaceRender(data) {
             "<td class='" + pnlClass + "'>" + pnlPctText + "</td>" +
             "</tr>";
     }
-    
+
     table.innerHTML = html;
-    
+
     if (summary) {
         var t = data.totals;
         summary.innerHTML = "Total Balance: $" + Number(t.total_current_value).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
@@ -152,24 +146,59 @@ function processInterfaceRender(data) {
 }
 
 function switchToFallbackState() {
-    var indicator = document.getElementById("network-status-indicator");
-    if (indicator) indicator.style.display = "block";
-    
-    var table = document.getElementById("widget-portfolio-table");
-    if (!table) return;
-    
-    var rows = table.getElementsByTagName("tr");
-    for (var i = 1; i < rows.length; i++) {
-        var cells = rows[i].getElementsByTagName("td");
-        if (cells.length >= 8) {
-            cells[1].innerHTML = "N/A";
-            cells[4].innerHTML = "0.00";
-            cells[6].innerHTML = "0.00";
-            cells[7].innerHTML = "0.00%";
-            cells[6].className = "pnl-neutral";
-            cells[7].className = "pnl-neutral";
-        }
+    // Keep last data. Heartbeat checker handles real server-down detection.
+    console.log("Portfolio data fetch failed. Keeping last known display.");
+}
+
+// ==============================================================================
+// SERVER HEARTBEAT CHECK (detects Flask down, shows warning overlay)
+// ==============================================================================
+var HEARTBEAT_INTERVAL_MS = 5000;
+var serverDown = false;
+
+function showServerDownOverlay() {
+    if (!serverDown) {
+        serverDown = true;
+        var overlay = document.getElementById("server-down-overlay");
+        if (overlay) overlay.style.display = "flex";
     }
+}
+
+function hideServerDownOverlay() {
+    if (serverDown) {
+        serverDown = false;
+        var overlay = document.getElementById("server-down-overlay");
+        if (overlay) overlay.style.display = "none";
+        // Re-fetch everything on recovery
+        requestPortfolioDataUpdate();
+        fetchServerTime();
+    }
+}
+
+function checkServerHeartbeat() {
+    var xhr = new XMLHttpRequest();
+    xhr.open("GET", "/api/ping", true);
+    xhr.timeout = 3000;
+
+    xhr.onreadystatechange = function() {
+        if (xhr.readyState === 4) {
+            if (xhr.status === 200) {
+                hideServerDownOverlay();
+            } else {
+                showServerDownOverlay();
+            }
+        }
+    };
+
+    xhr.onerror = function() {
+        showServerDownOverlay();
+    };
+
+    xhr.ontimeout = function() {
+        showServerDownOverlay();
+    };
+
+    xhr.send();
 }
 
 // Blinking colon: toggle between colon.png and colon_blank.png every 500ms
@@ -181,6 +210,10 @@ setInterval(fetchServerTime, CLOCK_POLLING_INTERVAL_MS);
 // Portfolio: poll server every 10 seconds for data
 setInterval(requestPortfolioDataUpdate, POLLING_INTERVAL_MS);
 
+// Heartbeat: check server status every 5 seconds
+setInterval(checkServerHeartbeat, HEARTBEAT_INTERVAL_MS);
+
 // Initial calls on page load
+checkServerHeartbeat();
 fetchServerTime();
 requestPortfolioDataUpdate();
