@@ -47,7 +47,7 @@
     </div>
 
     {% if BACKGROUND_TYPE == "image" %}
-    <img src="/static/bg/{{ BACKGROUND_IMAGE_FILE }}" id="layout-backdrop" />
+    <style>body { background: url('/static/bg/{{ BACKGROUND_IMAGE_FILE }}') center / cover no-repeat fixed; }</style>
     {% elif BACKGROUND_TYPE == "video" %}
     <video autoplay loop muted playsinline id="layout-backdrop">
         <source src="/static/bg/{{ BACKGROUND_VIDEO_FILE }}" type="video/mp4">

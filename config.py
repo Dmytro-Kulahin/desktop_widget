@@ -20,7 +20,7 @@ DATA_REFRESH_INTERVAL_MS = 30000
 #   color — solid BACKGROUND_COLOR only
 #   image — static backdrop from BACKGROUND_IMAGE_FILE
 #   video — looped H.264 Base Profile ≤720p (for legacy CPU)
-BACKGROUND_TYPE = "color"
+BACKGROUND_TYPE = "image"
 BACKGROUND_COLOR = "#000000"
 BACKGROUND_IMAGE_FILE = "img_background.jpg"
 BACKGROUND_VIDEO_FILE = "video_background.mp4"

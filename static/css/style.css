@@ -7,8 +7,7 @@ html, body {
     font-family: Arial, Helvetica, sans-serif;
 }
 
-#layout-backdrop,
-#layout-backdrop-video {
+#layout-backdrop {
     position: fixed;
     top: 0;
     left: 0;
